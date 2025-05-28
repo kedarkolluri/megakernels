@@ -20,9 +20,7 @@ from megakernels.scheduler import (
 
 
 class ScriptConfig(pydra.Config):
-    mk_path: Path = (
-        Path(__file__).parent.parent.parent.parent / "tests" / "vm" / "llama_official"
-    )
+    mk_dir: Path = Path(__file__).parent.parent.parent / "demos" / "low-latency-llama"
     model: str = "meta-llama/Llama-3.2-1B-Instruct"
     device: str = "cuda:0"
     prompt_len: int = 10
@@ -51,7 +49,7 @@ class ScriptConfig(pydra.Config):
 
     def th(self, bs=1024, sl=128):
         self.setting = "throughput"
-        self.mk_path = (
+        self.mk_dir = (
             Path(__file__).parent.parent.parent.parent
             / "tests"
             / "batch-vm"
@@ -85,7 +83,7 @@ def main(config: ScriptConfig):
     )
 
     builder = make_schedule_builder(config.setting)
-    mk_interpreter = make_mk_interpreter(config.setting, config.mk_path)
+    mk_interpreter = make_mk_interpreter(config.setting, config.mk_dir)
     pyvm_interpreter = make_pyvm_interpreter(config.setting)
 
     spy = builder.build(
@@ -99,24 +97,25 @@ def main(config: ScriptConfig):
     gpy = spy.globs
     gmk = smk.globs
 
-    pos_id = config.prompt_len + config.ntok
+    seq_len = config.prompt_len + config.ntok
+    pos_id = seq_len - 1
 
     gpy.pos_id = pos_id
     gmk.pos_id = pos_id
 
     normal_(gpy.hidden_states)
     gmk.hidden_states.copy_(gpy.hidden_states)
-    print("hidden states sum:", gpy.hidden_states.float().sum())
-
-    print("HACK LOW MEM NO KV CACHE GOODNESS")
 
     # NOTE: important to clone the KV caches since these originally come from the model
-    # and so are the same tensor.
-    normal_(gpy.k_cache)
-    # smk.globs.k_cache = spy.globs.k_cache.clone()
+    # and so are the same tensor (and therefore we don't want the kv cache
+    # append from one to affect the other).
+    normal_(gpy.k_cache[:, :, :seq_len])
+    normal_(gpy.v_cache[:, :, :seq_len])
+    normal_(gpy.k_cache[:, :, seq_len:], std=100)
+    normal_(gpy.v_cache[:, :, seq_len:], std=100)
 
-    normal_(gpy.v_cache)
-    # smk.globs.v_cache = spy.globs.v_cache.clone()
+    smk.globs.k_cache = spy.globs.k_cache.clone()
+    smk.globs.v_cache = spy.globs.v_cache.clone()
 
     instructions = spy.get_linear_instructions()
 
@@ -129,9 +128,9 @@ def main(config: ScriptConfig):
 
         starting_instructions = start_schedule.get_linear_instructions()
 
-        assert (
-            len(starting_instructions) < len(instructions)
-        ), f"num starting instructions {len(starting_instructions)} should be less than num total instructions {len(instructions)}"
+        assert len(starting_instructions) < len(instructions), (
+            f"num starting instructions {len(starting_instructions)} should be less than num total instructions {len(instructions)}"
+        )
         for i, i2 in zip(starting_instructions, instructions):
             assert i == i2
 

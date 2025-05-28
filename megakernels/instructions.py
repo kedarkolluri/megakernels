@@ -1,9 +1,10 @@
 from dataclasses import dataclass, fields
 from typing import Any
 
+from torch import Tensor
+
 from megakernels.model_types import DeviceType
 from megakernels.utils import get_sm_count
-from torch import Tensor
 
 
 @dataclass
@@ -50,7 +51,7 @@ class BaseGlobals:
     def sm_count(self) -> int:
         return get_sm_count(self.device)
 
-    def diff(self, other: "BaseGlobals", skip_kv_cache: bool = True):
+    def diff(self, other: "BaseGlobals", skip_kv_cache: bool = False):
         for field in fields(self):
             name = field.name
             attr = getattr(self, name)
