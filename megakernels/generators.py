@@ -1,6 +1,5 @@
 import torch
 from torch import Tensor
-from tqdm import tqdm
 
 from megakernels.llama import LlamaForCausalLM
 from megakernels.mk import MK_Interpreter
@@ -10,8 +9,53 @@ from megakernels.scheduler import Schedule
 
 
 class Generator:
-    def generate(self, output_tokens: Tensor, prompt_len: int, ntok: int):
+    def generate(
+        self,
+        output_tokens: Tensor,
+        prompt_len: int,
+        ntok: int,
+        ntok_already_generated: int = 1,
+    ):
         raise NotImplementedError
+
+    def generate_with_eos(
+        self,
+        output_tokens: Tensor,
+        prompt_len: int,
+        ntok: int,
+        eos_token_check_interval: int,
+        eos_token_ids: list[int],
+    ):
+        """
+        Return pos id with first eos token, and total num tokens generated
+        """
+        assert output_tokens.shape[0] == 1, "batch size must be 1"
+
+        for ntok_already_generated in range(
+            1,
+            ntok,
+            eos_token_check_interval,
+        ):
+            ntok_for_chunk = min(
+                eos_token_check_interval, ntok - ntok_already_generated
+            )
+            self.generate(
+                output_tokens,
+                prompt_len=prompt_len,
+                ntok=ntok_for_chunk,
+                ntok_already_generated=ntok_already_generated,
+            )
+
+            start_out_idx = ntok_already_generated
+            end_out_idx = ntok_already_generated + ntok_for_chunk
+
+            to_cpu = output_tokens[0, start_out_idx:end_out_idx].cpu()
+            for j, token in enumerate(to_cpu):
+                if token in eos_token_ids:
+                    # -1 because we didn't generate the first token
+                    return start_out_idx + j, end_out_idx - 1
+
+        return ntok, ntok - 1
 
 
 class PyTorchGenerator(Generator):
@@ -21,22 +65,31 @@ class PyTorchGenerator(Generator):
     ):
         self.model = model
 
-    def generate(self, output_tokens: Tensor, prompt_len: int, ntok: int):
+    def generate(
+        self,
+        output_tokens: Tensor,
+        prompt_len: int,
+        ntok: int,
+        ntok_already_generated: int = 1,
+    ):
         bs = output_tokens.shape[0]
+        starting_seq_len = prompt_len + ntok_already_generated
         start_position_ids = torch.ones(
             bs, 1, dtype=torch.long, device=self.model.device
-        ) * (prompt_len)
+        ) * (starting_seq_len - 1)
 
-        for i in tqdm(range(1, ntok)):
+        for i in range(ntok):
             position_ids = start_position_ids + i
+            input_token_pos = i + ntok_already_generated - 1
             decode_inp = BatchState(
-                input_ids=output_tokens[:, i - 1 : i],
+                input_ids=output_tokens[:, input_token_pos : input_token_pos + 1],
                 position_ids=position_ids,
-                seq_len=prompt_len + i + 1,
+                seq_len=starting_seq_len + i + 1,
             )
             decode_output: BatchState = self.model(decode_inp)
             assert decode_output.output_ids is not None
-            output_tokens[:, i] = decode_output.output_ids.squeeze(-1)
+            output_pos = input_token_pos + 1
+            output_tokens[:, output_pos] = decode_output.output_ids.squeeze(-1)
 
 
 class MK_Generator(Generator):
@@ -94,37 +147,23 @@ class MK_Generator(Generator):
         output_tokens: Tensor,
         prompt_len: int,
         ntok: int,
-        eos_token_ids: list[int] | None = None,
-        eos_token_check_interval: int | None = None,
+        ntok_already_generated: int = 1,
     ):
         """
         Return num tokens until stop seq, and total num tokens generated
         """
-        for i in tqdm(range(1, ntok)):
-            input_ids = output_tokens[:, i - 1 : i]
-            output_ids = self.run(input_ids, pos_id=prompt_len + i)
-            output_tokens[:, i] = output_ids
+        for i in range(ntok):
+            input_token_pos = ntok_already_generated + i - 1
+            output_token_pos = input_token_pos + 1
 
-            if eos_token_check_interval is not None and (
-                i % eos_token_check_interval == 0 or i == ntok - 1
-            ):
-                assert output_tokens.shape[0] == 1, "batch size must be 1"
+            input_ids = output_tokens[:, input_token_pos : input_token_pos + 1]
 
-                end = i
-                start = i - eos_token_check_interval
-                if start - eos_token_check_interval < 0:
-                    start = 0
-
-                to_cpu = output_tokens[0, start:end].cpu()
-                for j, token in enumerate(to_cpu):
-                    if token in eos_token_ids:
-                        # -1 because we didn't generate the first token
-                        return j + start, i - 1
-
-        return ntok, ntok - 1
+            pos_id = prompt_len + ntok_already_generated + i - 1
+            output_ids = self.run(input_ids, pos_id=pos_id)
+            output_tokens[:, output_token_pos] = output_ids.squeeze(-1)
 
 
-class PyVM_Generator(Generator):
+class PyVM_Generator(MK_Generator):
     def __init__(
         self,
         model: LlamaForCausalLM,
@@ -160,9 +199,3 @@ class PyVM_Generator(Generator):
         output_ids = post_lm_head.output_ids
         assert output_ids is not None
         return output_ids
-
-    def generate(self, output_tokens: Tensor, prompt_len: int, ntok: int):
-        for i in tqdm(range(1, ntok)):
-            input_ids = output_tokens[:, i - 1]
-            output_ids = self.run(input_ids, pos_id=prompt_len + i)
-            output_tokens[:, i] = output_ids

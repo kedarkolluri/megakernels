@@ -96,8 +96,11 @@ def main(config: ScriptConfig):
     )
 
     if config.chat:
+        messages = [
+            {"role": "user", "content": config.prompt},
+        ]
         tok_inp = tokenizer.apply_chat_template(
-            config.prompt, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True
         )
         input_ids_cpu = tokenizer(
             tok_inp, return_tensors="pt", add_special_tokens=False
@@ -168,7 +171,7 @@ def main(config: ScriptConfig):
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
         cpu_start = time.time()
-        gen.generate(output_tokens, prompt_len, config.ntok)
+        gen.generate(output_tokens, prompt_len, config.ntok - 1)
         cpu_end = time.time()
         end_event.record()
         torch.cuda.synchronize()
