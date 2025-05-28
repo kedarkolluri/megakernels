@@ -1,6 +1,9 @@
 # Compiler
 NVCC?=nvcc
+
+ifndef GPU
 GPU=B200
+endif
 
 TARGET=mk_llama
 SRC=llama.cu
